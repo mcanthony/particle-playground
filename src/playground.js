@@ -3,6 +3,9 @@ import * as Gui from './gui.js';
 import Clock from './clock.js';
 import { Body } from './entity.js';
 import CanvasRenderer from './canvas-renderer.js';
+import { TaggedUnion } from './enum.js';
+import Vec2 from './vec2.js';
+import ModalOverlay from './modal-overlay.js';
 import defaults from '../node_modules/defaults';
 
 // Webpack: load stylesheet
@@ -47,25 +50,25 @@ export default class Playground {
 		// TODO: should this be stored as a member of Playground?
 		this.selectedEntities = [];
 
-		// Define tools
-		this.tools = {};
-		this.tools.SELECT = { cursor: 'default' };
-		this.tools.CREATE = { cursor: 'crosshair' };
-		this.tools.MOVE = { cursor: 'grab', activeCursor: 'grabbing' };
-		this.tools.ZOOM = { cursor: 'zoom-in', altCursor: 'zoom-in' };
+		// Define tools (enum-like)
+		// this.TOOL = new Enum('SELECT', 'CREATE', 'MOVE', 'ZOOM');
+		this.tool = new TaggedUnion({
+			SELECT: { cursor: 'default', altCursor: 'pointer' },
+			CREATE: { cursor: 'crosshair' },
+			PAN: { cursor: 'move' },
+			ZOOM: { cursor: 'zoom-in', altCursor: 'zoom-out' },
+			GRAB: { cursor: 'grab', altCursor: 'grabbing' },
+			NONE: { cursor: 'not-allowed' }
+		});
 
 		// Input State
 		this.input = {
 			mouse: {
-				x: 0,
-				y: 0,
-				dx: 0,
-				dy: 0,
-				dragStartX: 0,
-				dragStartY: 0,
-				isDown: false,
-				tool: null,
-				lastTool: 'CREATE'
+				x: 0, y: 0,
+				dx: 0, dy: 0,
+				dragX: 0, dragY: 0,
+				dragStartX: 0, dragStartY: 0,
+				isDown: false
 			}
 		};
 
@@ -84,40 +87,96 @@ export default class Playground {
 			this.input.mouse.isDown = true;
 			this.input.mouse.dragStartX = e.layerX;
 			this.input.mouse.dragStartY = e.layerY;
+			this.input.mouse.dragX = 0;
+			this.input.mouse.dragY = 0;
 			this.input.mouse.dx = 0;
 			this.input.mouse.dy = 0;
+
+			switch (this.tool._current) {
+			case this.tool.PAN:
+				if (this.renderer.following !== null) { this.renderer.unfollow(); }
+				break;
+
+			case this.tool.GRAB:
+				this.renderer.setAltCursor(this.tool);
+				this.selectedEntities.forEach(entity => {
+					entity._fixed = entity.fixed;
+					entity.fixed = true;
+				});
+				break;
+			}
 		};
 		this.events.mousemove = function(e) {
-			this.input.mouse.dx = e.layerX - this.input.mouse.dragStartX;
-			this.input.mouse.dy = e.layerY - this.input.mouse.dragStartY;
+			let delta;
+			this.input.mouse.dx = e.layerX - this.input.mouse.x;
+			this.input.mouse.dy = e.layerY - this.input.mouse.y;
+			this.input.mouse.dragX = e.layerX - this.input.mouse.dragStartX;
+			this.input.mouse.dragY = e.layerY - this.input.mouse.dragStartY;
 			this.input.mouse.x = e.layerX;
 			this.input.mouse.y = e.layerY;
+
+			switch (this.tool._current) {
+				case this.tool.PAN:
+					if (this.input.mouse.isDown) {
+						delta = new Vec2(this.input.mouse.dx, this.input.mouse.dy);
+						this.renderer.camera.subtractSelf(delta);
+					}
+					break;
+
+				case this.tool.GRAB:
+					if (this.input.mouse.isDown) {
+						delta = new Vec2(this.input.mouse.dx, this.input.mouse.dy);
+						this.selectedEntities.forEach(entity => {
+							entity.position.addSelf(delta);
+							entity.velocity.set(delta.x, delta.y);
+						});
+					}
+					break;
+			}
 		};
 		this.events.mousewheel = function(e) {
 			this.input.mouse.wheel = e.wheelDelta;
 			this.simulator.parameters.createMass = Math.max(10, this.simulator.parameters.createMass + e.wheelDelta / 10);
 		};
 		this.events.mouseup = function(e) {
+			let particle;
 			this.input.mouse.isDown = false;
-			this.input.mouse.dx = e.layerX - this.input.mouse.dragStartX;
-			this.input.mouse.dy = e.layerY - this.input.mouse.dragStartY;
-			switch (this.input.mouse.tool) {
-				case 'CREATE':
-					this.simulator.entities.push(new Body(
-						this.input.mouse.dragStartX,
-						this.input.mouse.dragStartY,
+			this.input.mouse.dragX = e.layerX - this.input.mouse.dragStartX;
+			this.input.mouse.dragY = e.layerY - this.input.mouse.dragStartY;
+
+			switch (this.tool._current) {
+				case this.tool.CREATE:
+					particle = new Body(
+						this.input.mouse.dragStartX + this.renderer.camera.x,
+						this.input.mouse.dragStartY + this.renderer.camera.y,
 						this.simulator.parameters.createMass,
-						this.input.mouse.dx / 50,
-						this.input.mouse.dy / 50
-					));
-					break;
-				case 'SELECT':
-					this.selectRegion(this.input.mouse.dragStartX, this.input.mouse.dragStartY,
-						this.input.mouse.dx, this.input.mouse.dy
+						this.input.mouse.dragX / 50,
+						this.input.mouse.dragY / 50
 					);
+					this.simulator.entities.push(particle);
+					this.selectedEntities = [particle];
+					this.events.selection(this.selectedEntities);
+					break;
+
+				case this.tool.SELECT:
+					this.selectRegion(
+						this.input.mouse.dragStartX + this.renderer.camera.x,
+						this.input.mouse.dragStartY + this.renderer.camera.y,
+						this.input.mouse.dragX, this.input.mouse.dragY
+					);
+					break;
+
+				case this.tool.GRAB:
+					this.renderer.setCursor(this.tool);
+					this.selectedEntities.forEach(entity => {
+						entity.fixed = entity._fixed;
+					});
 					break;
 			}
 		};
+		this.events.selection = function(entities) {};
+		this.events.pause = function () {};
+		this.events.resume = function () {};
 
 		// Attach event handlers
 		window.addEventListener('resize', this.events.resize.bind(this));
@@ -128,82 +187,83 @@ export default class Playground {
 		this.renderer.el.addEventListener('mousewheel', this.events.mousewheel.bind(this));
 	}
 
+	listen(eventName, handler) {
+		this.events[eventName] = handler;
+	}
+
 	selectRegion(x, y, w, h) {
-		let e, e_x, e_y, i, idx, withinX, withinY;
-
 		this.selectedEntities.length = 0;
-		this.selectedEntities = [];
 
-		if (this.input.mouse.dx === 0 && this.input.mouse.dy === 0) {
-			return this;
-		}
+		this.selectedEntities = this.simulator.entities.filter(e => {
+			return e.inRegion(x, y, w, h);
+		});
 
-		[x, w] = [Math.min(x, w), Math.max(x, w)];
-		[y, h] = [Math.min(y, h), Math.max(y, h)];
+		this.events.selection(this.selectedEntities);
 
-		let len = this.simulator.entities.length;
-		for (i = 0; i < len; i++) {
-			e = this.simulator.entities[i];
-			e_x = e.position.x;
-			e_y = e.position.y;
-
-			withinX = x - e.radius < e_x && e_x < x + w + e.radius;
-			withinY = y - e.radius < e_y && e_y < y + h + e.radius;
-
-			if (withinX && withinY) {
-				this.selectedEntities.push(e);
-			} else {
-				idx = this.selectedEntities.indexOf(e);
-				if (idx > 0) {
-					this.selectedEntities.splice(idx, 1);
-				}
-			}
-		}
 		return this;
+	}
+
+	deselect() {
+		this.selectedEntities.length = 0;
+		this.events.selection(this.selectedEntities);
 	}
 
 	setTool(tool) {
-		if (tool !== this.input.mouse.tool) {
-			this.input.mouse.lastTool = this.input.mouse.tool;
-			this.input.mouse.tool = tool;
-			this.renderer.el.style.cursor = this.tools[tool].cursor;
+		if (tool !== this.tool._current) {
+			this.tool.setCurrent(tool);
+			this.renderer.setCursor(this.tool);
 		}
-		return this;
-	}
-
-	toggleTool() {
-		this.setTool(this.input.mouse.lastTool);
 		return this;
 	}
 
 	start() {
-		// this.clock.register(this.simulator.update.bind(this.simulator, this.clock.dt));
-		// this.clock.register(this.renderer.render.bind(
-		// 	this.renderer,
-		// 	this.simulator.entities,
-		// 	this.input,
-		// 	this.selectedEntities,
-		// 	this.simulator.stats,
-		// 	this.simulator.parameters
-		// ));
 		this.loop(1 / 60);
+	}
+
+	pause() {
+		this.paused = !this.paused;
+		if (this.paused) { this.events.pause(); }
+		else { this.events.resume(); }
 	}
 
 	stop() {
 		cancelAnimationFrame(this.animator);
+		this.setTool(this.tool.NONE);
+		this.deselect();
+
+		let refreshMessage = new ModalOverlay(
+			'Simulation stopped',
+			'Reload the page to restart the simulation.',
+			[
+				{ text: 'Cancel', soft: true, onclick: (e) => { refreshMessage.destroy(); } },
+				{ text: 'Reload', onclick: (e) => { document.location.reload(); } }
+			],
+			'ion-ios-refresh-outline'
+		);
+		refreshMessage.appendTo(this.el);
+
+		// Blur background
+		this.el.classList.add('defocus');
+	}
+
+	reset() {
+		this.simulator.reset();
+		this.deselect();
 	}
 
 	loop(t) {
 		let dt = (t - this.runtime) / 10;
 		this.runtime = t;
 		this.animator = requestAnimationFrame(this.loop.bind(this));
-		this.simulator.update(dt);
+		if (!this.paused) { this.simulator.update(dt); }
 		this.renderer.render(
 			this.simulator.entities,
 			this.input,
 			this.selectedEntities,
 			this.simulator.stats,
-			this.simulator.parameters
+			this.simulator.parameters,
+			this.tool,
+			this.simulator.options
 		);
 		// this.clock.tick();
 	}
